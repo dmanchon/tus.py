@@ -7,6 +7,7 @@ import argparse
 
 import aiohttp
 import asyncio
+import abc
 
 LOG_LEVEL = logging.INFO
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
@@ -16,6 +17,30 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.NullHandler())
 
+class TusStream(object, metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    async def read(self, offset, size):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    async def size(self):
+        raise NotImplementedError()
+
+class FileStream(TusStream):
+    def __init__(self, filename):
+        self._file = open(filename, 'rb')
+        self._file.seek(0, os.SEEK_END)
+        self._size = self._file.tell()
+        self._file.seek(0)
+        
+    async def read(self, offset, size):
+        self._file.seek(offset)
+        data = self._file.read(size)
+        return data
+
+    async def size(self):
+        return self._size
+        
 
 class TusError(Exception):
     def __init__(self, message, response=None):
@@ -88,8 +113,10 @@ async def async_cmd_upload():
 
     print(file_endpoint)
 
+    obj = FileStream(args.file.name)
+
     await resume(
-        args.file,
+        obj,
         file_endpoint,
         chunk_size=args.chunk_size,
         headers=args.headers,
@@ -106,8 +133,10 @@ async def async_cmd_resume():
     parser.add_argument('file_endpoint')
     args = parser.parse_args()
 
+    obj = FileStream(args.file.name)
+
     await resume(
-        args.file,
+        obj,
         args.file_endpoint,
         chunk_size=args.chunk_size,
         headers=args.headers)
@@ -117,7 +146,7 @@ def _cmd_resume():
     loop.run_until_complete(async_cmd_resume())
 
 
-async def upload(file_obj,
+async def upload(obj,
            tus_endpoint,
            chunk_size=DEFAULT_CHUNK_SIZE,
            file_name=None,
@@ -135,7 +164,7 @@ async def upload(file_obj,
         metadata=metadata)
 
     await resume(
-        file_obj,
+        obj,
         file_endpoint,
         chunk_size=chunk_size,
         headers=headers,
@@ -177,25 +206,22 @@ async def create(tus_endpoint, file_name, file_size, headers=None, metadata=None
             location = response.headers["Location"]
             logger.info("Created: %s", location)
             return location
-
-
-async def resume(file_obj,
-           file_endpoint,
-           chunk_size=DEFAULT_CHUNK_SIZE,
-           headers=None,
-           offset=None):
-
+        
+async def resume(stream_obj,
+                  file_endpoint,
+                  chunk_size=DEFAULT_CHUNK_SIZE,
+                  headers=None,
+                  offset=None):
     if offset is None:
         offset = await _get_offset(file_endpoint, headers=headers)
 
     total_sent = 0
-    file_size = _get_file_size(file_obj)
+    file_size = await stream_obj.size()
     while offset < file_size:
-        file_obj.seek(offset)
-        data = file_obj.read(chunk_size)
+        data = await stream_obj.read(offset, chunk_size)
         offset = await _upload_chunk(data, offset, file_endpoint, headers=headers)
         total_sent += len(data)
-        logger.info("Total bytes sent: %i", total_sent)
+        logger.info("Total bytes send: %i", total_sent)
 
 
 async def _get_offset(file_endpoint, headers=None):
