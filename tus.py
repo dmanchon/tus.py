@@ -1,10 +1,12 @@
+
 from __future__ import print_function
 import os
 import base64
 import logging
 import argparse
 
-import requests
+import aiohttp
+import asyncio
 
 LOG_LEVEL = logging.INFO
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
@@ -57,7 +59,7 @@ def _create_parent_parser():
     return parser
 
 
-def _cmd_upload():
+async def async_cmd_upload():
     _init()
 
     parser = _create_parent_parser()
@@ -77,7 +79,7 @@ def _cmd_upload():
     file_name = args.file_name or os.path.basename(args.file.name)
     file_size = _get_file_size(args.file)
 
-    file_endpoint = create(
+    file_endpoint = await create(
         args.tus_endpoint,
         file_name,
         file_size,
@@ -86,29 +88,36 @@ def _cmd_upload():
 
     print(file_endpoint)
 
-    resume(
+    await resume(
         args.file,
         file_endpoint,
         chunk_size=args.chunk_size,
         headers=args.headers,
         offset=0)
 
+def _cmd_upload():
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(async_cmd_upload())
 
-def _cmd_resume():
+async def async_cmd_resume():
     _init()
 
     parser = _create_parent_parser()
     parser.add_argument('file_endpoint')
     args = parser.parse_args()
 
-    resume(
+    await resume(
         args.file,
         args.file_endpoint,
         chunk_size=args.chunk_size,
         headers=args.headers)
 
+def _cmd_resume():
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(async_cmd_resume())
 
-def upload(file_obj,
+
+async def upload(file_obj,
            tus_endpoint,
            chunk_size=DEFAULT_CHUNK_SIZE,
            file_name=None,
@@ -118,14 +127,14 @@ def upload(file_obj,
     file_name = file_name or os.path.basename(file_obj.name)
     file_size = _get_file_size(file_obj)
 
-    file_endpoint = create(
+    file_endpoint = await create(
         tus_endpoint,
         file_name,
         file_size,
         headers=headers,
         metadata=metadata)
 
-    resume(
+    await resume(
         file_obj,
         file_endpoint,
         chunk_size=chunk_size,
@@ -141,7 +150,7 @@ def _get_file_size(f):
     return size
 
 
-def create(tus_endpoint, file_name, file_size, headers=None, metadata=None):
+async def create(tus_endpoint, file_name, file_size, headers=None, metadata=None):
     logger.info("Creating file endpoint")
 
     h = {
@@ -159,36 +168,37 @@ def create(tus_endpoint, file_name, file_size, headers=None, metadata=None):
         ]
         h["Upload-Metadata"] = ','.join(pairs)
 
-    response = requests.post(tus_endpoint, headers=h)
-    if response.status_code != 201:
-        raise TusError("Create failed: Status=%s" % response.status_code,
-                       response=response)
+    async with aiohttp.ClientSession() as client:
+        async with client.post(tus_endpoint, headers=h) as response:
+            if response.status != 201:
+                raise TusError("Create failed: Status=%s" % response.status,
+                               response=response)
 
-    location = response.headers["Location"]
-    logger.info("Created: %s", location)
-    return location
+            location = response.headers["Location"]
+            logger.info("Created: %s", location)
+            return location
 
 
-def resume(file_obj,
+async def resume(file_obj,
            file_endpoint,
            chunk_size=DEFAULT_CHUNK_SIZE,
            headers=None,
            offset=None):
 
     if offset is None:
-        offset = _get_offset(file_endpoint, headers=headers)
+        offset = await _get_offset(file_endpoint, headers=headers)
 
     total_sent = 0
     file_size = _get_file_size(file_obj)
     while offset < file_size:
         file_obj.seek(offset)
         data = file_obj.read(chunk_size)
-        offset = _upload_chunk(data, offset, file_endpoint, headers=headers)
+        offset = await _upload_chunk(data, offset, file_endpoint, headers=headers)
         total_sent += len(data)
         logger.info("Total bytes sent: %i", total_sent)
 
 
-def _get_offset(file_endpoint, headers=None):
+async def _get_offset(file_endpoint, headers=None):
     logger.info("Getting offset")
 
     h = {"Tus-Resumable": TUS_VERSION}
@@ -196,15 +206,17 @@ def _get_offset(file_endpoint, headers=None):
     if headers:
         h.update(headers)
 
-    response = requests.head(file_endpoint, headers=h)
-    response.raise_for_status()
+    async with aiohttp.ClientSession() as client:
+        async with client.request('HEAD', file_endpoint, headers=h) as response:
+            if response.status > 400:
+                raise Exception()
+      
+            offset = int(response.headers["Upload-Offset"])
+            logger.info("offset=%i", offset)
+            return offset
 
-    offset = int(response.headers["Upload-Offset"])
-    logger.info("offset=%i", offset)
-    return offset
 
-
-def _upload_chunk(data, offset, file_endpoint, headers=None):
+async def _upload_chunk(data, offset, file_endpoint, headers=None):
     logger.info("Uploading %d bytes chunk from offset: %i", len(data), offset)
 
     h = {
@@ -216,9 +228,10 @@ def _upload_chunk(data, offset, file_endpoint, headers=None):
     if headers:
         h.update(headers)
 
-    response = requests.patch(file_endpoint, headers=h, data=data)
-    if response.status_code != 204:
-        raise TusError("Upload chunk failed: Status=%s" % response.status_code,
-                       response=response)
+    async with aiohttp.ClientSession() as client:
+        async with client.patch(file_endpoint, headers=h, data=data) as response:
+            if response.status != 204:
+                raise TusError("Upload chunk failed: Status=%s" % response.status_code,
+                               response=response)
 
-    return int(response.headers["Upload-Offset"])
+            return int(response.headers["Upload-Offset"])

@@ -12,7 +12,7 @@ setup(
     include_package_data=True,
     zip_safe=True,
     platforms='any',
-    install_requires=['requests'],
+    install_requires=['aiohttp'],
     entry_points={
         'console_scripts': [
             'tus-upload = tus:_cmd_upload',
