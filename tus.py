@@ -256,8 +256,8 @@ async def _upload_chunk(data, offset, file_endpoint, headers=None):
 
     async with aiohttp.ClientSession() as client:
         async with client.patch(file_endpoint, headers=h, data=data) as response:
-            if response.status != 204:
-                raise TusError("Upload chunk failed: Status=%s" % response.status_code,
+            if response.status != 204 and response.status != 200:
+                raise TusError("Upload chunk failed: Status=%s" % response.status,
                                response=response)
 
             return int(response.headers["Upload-Offset"])
