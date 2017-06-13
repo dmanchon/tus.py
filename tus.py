@@ -199,7 +199,7 @@ async def create(tus_endpoint, file_name, file_size, headers=None, metadata=None
 
     async with aiohttp.ClientSession() as client:
         async with client.post(tus_endpoint, headers=h) as response:
-            if response.status != 201:
+            if response.status not in [201, 200]:
                 raise TusError("Create failed: Status=%s" % response.status,
                                response=response)
 
